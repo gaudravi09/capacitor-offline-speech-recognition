@@ -1,6 +1,6 @@
 # Capacitor Offline Speech Recognition Plugin
 
-A Capacitor plugin that provides offline speech-to-text functionality for Android and iOS platforms. The plugin offers true offline recognition for Android with multiple languages, while iOS provides offline support for English with online fallback for other languages.
+A Capacitor plugin that provides offline speech-to-text functionality for Android and iOS platforms. The plugin uses the Vosk engine on both platforms for fully offline recognition with downloadable language models.
 
 ## Maintainers
 
@@ -33,7 +33,7 @@ npx cap sync
 ## Platform Support
 
 - ✅ **Android** - Full offline support with Vosk models for 15+ languages
-- ✅ **iOS** - Native Speech framework support (offline for English, online for others)
+- ✅ **iOS** - Full offline support with Vosk models (uses Vosk instead of Apple's Speech framework)
 - ❌ **Web** - Not supported (requires offline model files)
 
 ## System Requirements
@@ -45,15 +45,15 @@ npx cap sync
 - **RAM**: Minimum 2GB recommended for optimal performance
 
 ### iOS
-- **Minimum iOS**: 12.0
-- **Target iOS**: 17.0
-- **Storage**: No additional storage required (uses system models)
+- **Minimum iOS**: 14.0
+- **Target iOS**: 17.0+
+- **Storage**: ~50MB per language model
 - **RAM**: Minimum 2GB recommended for optimal performance
 
 ### Dependencies
 - **Capacitor**: ^5.0.0
 - **Android**: Vosk Android SDK 0.3.70
-- **iOS**: Native Speech framework (built-in)
+- **iOS**: Vosk iOS static library (bundled xcframework), `Accelerate`, `AVFoundation`, `AudioToolbox`, and `SSZipArchive`
 
 ## iOS
 
@@ -67,22 +67,27 @@ The plugin requires the following minimum iOS versions:
 
 ### Permissions
 
-iOS requires the following usage descriptions be added and filled out for your app in `Info.plist`:
+Since iOS now uses Vosk (not Apple's Speech framework), only the microphone usage description is required in your app `Info.plist`:
 
-* `NSSpeechRecognitionUsageDescription` (`Privacy - Speech Recognition Usage Description`)
 * `NSMicrophoneUsageDescription` (`Privacy - Microphone Usage Description`)
 
 ### iOS Setup
 
-Add the following permissions to your iOS app's `Info.plist` file:
+1) Add the following permission to your iOS app's `Info.plist` file:
 
 ```xml
 <key>NSMicrophoneUsageDescription</key>
 <string>This app needs access to microphone for speech recognition functionality.</string>
-<key>NSSpeechRecognitionUsageDescription</key>
-<string>This app needs access to speech recognition for converting speech to text.</string>
 ```
 
+2) CocoaPods integration: after installing this plugin, run the following to integrate the bundled `libvosk.xcframework` and dependencies (`SSZipArchive`, `Accelerate`, `AVFoundation`, `AudioToolbox`):
+
+```bash
+cd ios/App
+pod install
+```
+
+3) The plugin downloads and unzips Vosk language models on-demand into the app’s Documents directory.
 
 ## Android
 
@@ -349,7 +354,7 @@ Remove all listeners
 - Japanese - `ja`
 - Korean - `ko`
 
-### iOS (Native Speech Framework)
+### iOS (Vosk Models)
 - English (US) - `en-us`
 - German - `de`
 - French - `fr`
@@ -368,21 +373,18 @@ Remove all listeners
 
 ## Platform Differences
 
-| Feature | Android (Vosk) | iOS (Speech Framework) |
-|---------|----------------|------------------------|
-| **Models** | Downloaded Vosk models (50MB+ each) | System-managed models |
-| **Offline** | True offline (all languages) | Offline for English, online for others |
-| **Download** | Real model downloads from alphacephei.com | Language availability check |
-| **Languages** | 15+ Vosk models | 15+ system languages |
-| **Storage** | User storage (cache directory) | No user storage |
+| Feature | Android (Vosk) | iOS (Vosk) |
+|---------|----------------|------------|
+| **Models** | Downloaded Vosk models (50MB+ each) | Downloaded Vosk models (50MB+ each) |
+| **Offline** | True offline (all languages) | True offline (all languages) |
+| **Download** | Real model downloads from alphacephei.com | Real model downloads from alphacephei.com |
+| **Languages** | 15+ Vosk models | 15+ Vosk models |
+| **Storage** | App storage (cache/Documents) | App storage (Documents) |
 
 ## Permission Handling
 
 ### iOS
-The plugin automatically requests permissions when needed:
-1. Speech recognition permission on plugin load
-2. Microphone permission when starting recognition
-3. User sees permission dialogs with your custom messages
+Only microphone permission is required. The plugin requests it when starting recognition.
 
 ### Android
 The plugin uses Capacitor's permission system:
@@ -393,9 +395,10 @@ The plugin uses Capacitor's permission system:
 ## Troubleshooting
 
 ### iOS Issues
-- **Permission denied**: Check Info.plist has correct keys
-- **No permission dialog**: Ensure testing on real device
-- **Speech recognition fails**: Check if language is supported on device
+- **Permission denied**: Check `NSMicrophoneUsageDescription` exists in Info.plist
+- **No progress updates**: Ensure listener is registered before calling `downloadLanguageModel`
+- **Linker errors**: Run `pod install` after plugin updates; ensure Pods include `Accelerate`, `AVFoundation`, `AudioToolbox`, `SSZipArchive`
+- **Model verification failed**: Re-download the model; extraction may have failed or been interrupted
 
 ### Android Issues
 - **Permission denied**: Check if user manually denied permissions

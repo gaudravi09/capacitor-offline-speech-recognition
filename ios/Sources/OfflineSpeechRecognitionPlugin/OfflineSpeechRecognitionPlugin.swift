@@ -1,88 +1,87 @@
-import Speech
 import Capacitor
-import Foundation
 import AVFoundation
+import Foundation
 
 @objc(OfflineSpeechRecognitionPlugin)
 public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
-
     public let jsName = "OfflineSpeechRecognition"
     public let identifier = "OfflineSpeechRecognitionPlugin"
-
     public let pluginMethods: [CAPPluginMethod] = [
-        CAPPluginMethod(name: "stopRecognition", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "startRecognition", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getSupportedLanguages", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getDownloadedLanguageModels", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "downloadLanguageModel", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getDownloadedLanguageModels", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "startRecognition", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopRecognition", returnType: CAPPluginReturnPromise)
     ]
     
-    private var isRecording = false
-    private var currentLanguage = "en-US"
     private var audioEngine: AVAudioEngine?
-    private var speechRecognizer: SFSpeechRecognizer?
-    private var recognitionTask: SFSpeechRecognitionTask?
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var processingQueue: DispatchQueue?
+    private var voskModel: VoskModel?
+    private var voskRecognizer: VoskRecognizer?
+    private var isRecording = false
+    private var currentLanguage = "en-us"
+    private var modelDownloadManager: ModelDownloadManager?
     
-    // supported languages mapping to locale identifiers
+    // supported languages mapping to model names - same as Android
     private let supportedLanguages: [String: String] = [
-        "en-us": "en-US",
-        "de": "de-DE",
-        "fr": "fr-FR",
-        "es": "es-ES",
-        "pt": "pt-PT",
-        "zh": "zh-CN",
-        "ru": "ru-RU",
-        "tr": "tr-TR",
-        "vi": "vi-VN",
-        "it": "it-IT",
-        "hi": "hi-IN",
-        "gu": "gu-IN",
-        "te": "te-IN",
-        "ja": "ja-JP",
-        "ko": "ko-KR"
+        "en-us": "model-en",
+        "de": "model-de",
+        "fr": "model-fr",
+        "es": "model-es",
+        "pt": "model-pt",
+        "zh": "model-zh",
+        "ru": "model-ru",
+        "tr": "model-tr",
+        "vi": "model-vi",
+        "it": "model-it",
+        "hi": "model-hi",
+        "gu": "model-gu",
+        "te": "model-te",
+        "ja": "model-ja",
+        "ko": "model-ko"
     ]
     
-    // language names mapping
+    // Language names mapping
     private let languageNames: [String: String] = [
         "hi": "Hindi",
+        "ko": "Korean",
         "de": "German",
         "fr": "French",
         "te": "Telugu",
-        "ko": "Korean",
-        "it": "Italian",
-        "tr": "Turkish",
-        "zh": "Chinese",
         "es": "Spanish",
+        "zh": "Chinese",
         "ru": "Russian",
-        "ja": "Japanese",
+        "tr": "Turkish",
+        "it": "Italian",
         "gu": "Gujarati",
+        "ja": "Japanese",
         "pt": "Portuguese",
         "vi": "Vietnamese",
-        "en-us": "English (US)"
+        "en-us": "English (US)",
+        "en-in": "English (India)"
     ]
     
     override public func load() {
         super.load()
-        requestSpeechRecognitionPermission()
+        print("SpeechToTextPlugin loaded")
+        requestMicrophonePermission()
+        modelDownloadManager = ModelDownloadManager()
+        print("Model download manager initialized")
     }
-
+    
+    // MARK: - Plugin Methods
+    
     @objc func getSupportedLanguages(_ call: CAPPluginCall) {
         var languages: [[String: Any]] = []
         
-        for (code, locale) in supportedLanguages {
-            let isAvailable = isLanguageModelAvailable(locale: locale)
-            let isOfflineSupported = isOfflineSupported(locale: locale)
-            
-            if isAvailable {
-                let language: [String: Any] = [
-                    "code": code,
-                    "modelFile": "model-\(code)",
-                    "name": languageNames[code] ?? code,
-                    "offlineSupported": isOfflineSupported
-                ]
-                languages.append(language)
-            }
+        for (code, modelName) in supportedLanguages {
+            let language: [String: Any] = [
+                "code": code,
+                "modelName": modelName,
+                "name": languageNames[code] ?? code,
+                "offlineSupported": true
+            ]
+            languages.append(language)
         }
         
         call.resolve(["languages": languages])
@@ -91,16 +90,19 @@ public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func getDownloadedLanguageModels(_ call: CAPPluginCall) {
         var models: [[String: Any]] = []
         
-        for (code, locale) in supportedLanguages {
-            if isLanguageModelAvailable(locale: locale) {
-                let isOfflineSupported = isOfflineSupported(locale: locale)
+        guard let downloadManager = modelDownloadManager else {
+            call.reject("Model download manager not initialized")
+            return
+        }
+        
+        for (code, modelName) in supportedLanguages {
+            if downloadManager.isModelDownloaded(modelName: modelName) {
                 let model: [String: Any] = [
+                    "modelName": modelName,
                     "language": code,
-                    "path": "system://\(code)",
-                    "modelName": "model-\(code)",
-                    "size": getModelSize(for: code),
                     "name": languageNames[code] ?? code,
-                    "offlineSupported": isOfflineSupported
+                    "size": downloadManager.getModelSize(modelName: modelName),
+                    "offlineSupported": true
                 ]
                 models.append(model)
             }
@@ -115,98 +117,116 @@ public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         
-        guard let locale = supportedLanguages[language] else {
+        guard let modelName = supportedLanguages[language] else {
             call.reject("Unsupported language: \(language)")
             return
         }
         
-        // check if model is already available
-        if isLanguageModelAvailable(locale: locale) {
+        guard let downloadManager = modelDownloadManager else {
+            call.reject("Model download manager not initialized")
+            return
+        }
+        
+        // Check if model is already downloaded
+        if downloadManager.isModelDownloaded(modelName: modelName) {
             call.resolve([
                 "success": true,
                 "language": language,
-                "message": "Model already available"
+                "message": "Model already downloaded",
+                "offlineSupported": true
             ])
             return
         }
         
-        // for iOS, we check if the language is supported
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)) else {
-            call.reject("Language not supported by iOS Speech framework")
+        // Check if download is already in progress
+        if downloadManager.isDownloadInProgress(modelName: modelName) {
+            call.reject("Download already in progress for this model")
             return
         }
         
-        guard recognizer.isAvailable else {
-            call.reject("Language not available on this device")
-            return
-        }
-        
-        let isOfflineSupported = isOfflineSupported(locale: locale)
-        let message = isOfflineSupported ? 
-            "Language supported for offline recognition" : 
-            "Language supported (requires internet connection)"
-        
-        call.resolve([
-            "success": true,
-            "language": language,
-            "message": message,
-            "offlineSupported": isOfflineSupported
-        ])
+        // Start download
+        downloadManager.downloadModel(
+            modelName: modelName,
+            onProgress: { progress in
+                let progressData: [String: Any] = [
+                    "progress": progress,
+                    "message": "Downloading model... \(progress)%"
+                ]
+                self.notifyListeners("downloadProgress", data: progressData)
+            },
+            onSuccess: {
+                call.resolve([
+                    "success": true,
+                    "language": language,
+                    "message": "Model downloaded successfully",
+                    "offlineSupported": true
+                ])
+            },
+            onError: { error in
+                call.reject("Error downloading model: \(error)")
+            }
+        )
     }
     
     @objc func startRecognition(_ call: CAPPluginCall) {
         let language = call.getString("language", "en-us")
         
-        guard let locale = supportedLanguages[language] else {
+        print("Starting recognition for language: \(language)")
+        
+        guard let modelName = supportedLanguages[language] else {
+            print("ERROR: Unsupported language: \(language)")
             call.reject("Unsupported language: \(language)")
             return
         }
         
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)) else {
-            call.reject("Language not supported by iOS Speech framework")
+        guard let downloadManager = modelDownloadManager else {
+            call.reject("Model download manager not initialized")
             return
         }
         
-        guard recognizer.isAvailable else {
-            call.reject("Language not available on this device")
+        // Check if model is downloaded
+        if !downloadManager.isModelDownloaded(modelName: modelName) {
+            call.reject("Language model not downloaded. Please download the model first.")
             return
         }
         
-        // check permissions
-        guard checkPermissions() else {
+        // Check permissions
+        guard checkMicrophonePermission() else {
+            print("ERROR: Microphone permission not granted")
             call.reject("Microphone permission is required")
             return
         }
         
-        startSpeechRecognition(locale: locale, language: language)
-        call.resolve()
+        do {
+            try loadModel(modelName: modelName)
+            startVoskRecognition(language: language)
+            call.resolve()
+        } catch {
+            print("ERROR: Failed to load model: \(error)")
+            call.reject("Failed to load model: \(error.localizedDescription)")
+        }
     }
     
     @objc func stopRecognition(_ call: CAPPluginCall) {
-        stopSpeechRecognition()
+        stopVoskRecognition()
         call.resolve()
     }
     
-    private func requestSpeechRecognitionPermission() {
-        SFSpeechRecognizer.requestAuthorization { authStatus in
+    // MARK: - Private Methods
+    
+    private func requestMicrophonePermission() {
+        AVAudioSession.sharedInstance().requestRecordPermission { granted in
             DispatchQueue.main.async {
-                switch authStatus {
-                case .authorized:
-                    print("Speech recognition authorized")
-                case .denied:
-                    print("Speech recognition denied")
-                case .restricted:
-                    print("Speech recognition restricted")
-                case .notDetermined:
-                    print("Speech recognition not determined")
-                @unknown default:
-                    print("Speech recognition unknown status")
+                if granted {
+                    print("Microphone permission granted")
+                } else {
+                    print("Microphone permission denied")
                 }
             }
         }
     }
     
-    private func checkPermissions() -> Bool {
+    private func checkMicrophonePermission() -> Bool {
         let audioSession = AVAudioSession.sharedInstance()
         
         switch audioSession.recordPermission {
@@ -216,7 +236,7 @@ public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
             return false
         case .undetermined:
             audioSession.requestRecordPermission { granted in
-                // permission result handled asynchronously
+                // Permission result handled asynchronously
             }
             return false
         @unknown default:
@@ -224,153 +244,145 @@ public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
     
-    private func isLanguageModelAvailable(locale: String) -> Bool {
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)) else {
-            return false
+    private func loadModel(modelName: String) throws {
+        guard let downloadManager = modelDownloadManager else {
+            throw NSError(domain: "SpeechToTextPlugin", code: -1, userInfo: [NSLocalizedDescriptionKey: "Model download manager not initialized"])
         }
         
-        // check if the language is supported (either offline or online)
-        return recognizer.isAvailable
-    }
-    
-    private func isOfflineSupported(locale: String) -> Bool {
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)) else {
-            return false
+        // Resolve the actual root dir (handles zips with a top-level folder)
+        let modelDir = downloadManager.getResolvedModelDirectory(modelName: modelName)
+        
+        if !FileManager.default.fileExists(atPath: modelDir.path) {
+            throw NSError(domain: "SpeechToTextPlugin", code: -1, userInfo: [NSLocalizedDescriptionKey: "Model directory not found: \(modelDir.path)"])
         }
         
-        // check if on-device recognition is supported
-        if #available(iOS 13.0, *) {
-            return recognizer.supportsOnDeviceRecognition
-        } else {
-            // for iOS 12 and below, assume offline is not supported
-            return false
+        if !downloadManager.verifyModel(modelDir: modelDir) {
+            throw NSError(domain: "SpeechToTextPlugin", code: -1, userInfo: [NSLocalizedDescriptionKey: "Model verification failed. Model files may be corrupted or incomplete."])
         }
+        
+        print("Loading Vosk model from: \(modelDir.path)")
+        
+        // Initialize processing queue if not already done
+        if processingQueue == nil {
+            processingQueue = DispatchQueue(label: "voskRecognizerQueue")
+        }
+        
+        // Load the model
+        voskModel = VoskModel(modelPath: modelDir.path)
+        
+        if voskModel?.model == nil {
+            throw NSError(domain: "SpeechToTextPlugin", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to load Vosk model from: \(modelDir.path)"])
+        }
+        
+        print("Vosk model loaded successfully")
     }
     
-    private func getModelSize(for language: String) -> Int {
-        // iOS doesn't download models locally, so we return 0
-        return 0
-    }
-    
-    private func startSpeechRecognition(locale: String, language: String) {
-        guard let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)) else {
-            print("Speech recognizer not available for locale: \(locale)")
+    private func startVoskRecognition(language: String) {
+        guard let voskModel = voskModel else {
+            print("ERROR: Vosk model not initialized")
             return
         }
         
-        // check if on-device recognition is supported for this locale
-        let supportsOffline = isOfflineSupported(locale: locale)
-        if !supportsOffline {
-            print("On-device recognition not supported for locale: \(locale), will use online recognition")
-        }
+        print("Starting Vosk recognition...")
         
-        guard speechRecognizer.isAvailable else {
-            print("Speech recognizer not available")
-            return
-        }
-        
-        self.speechRecognizer = speechRecognizer
-        self.currentLanguage = language
-        
-        // cancel any previous recognition task
-        if let recognitionTask = recognitionTask {
-            recognitionTask.cancel()
-            self.recognitionTask = nil
-        }
-        
-        // create audio session
-        let audioSession = AVAudioSession.sharedInstance()
         do {
+            // Configure audio session
+            let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch {
-            print("Audio session setup failed: \(error)")
-            return
-        }
-        
-        // create recognition request
-        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-        guard let recognitionRequest = recognitionRequest else {
-            print("Unable to create recognition request")
-            return
-        }
-        
-        recognitionRequest.shouldReportPartialResults = true
-        
-        // force on-device recognition only if supported
-        if #available(iOS 13.0, *) {
-            if supportsOffline {
-                recognitionRequest.requiresOnDeviceRecognition = true
-                print("Using offline recognition for locale: \(locale)")
-            } else {
-                print("Using online recognition for locale: \(locale)")
-            }
-        }
-        
-        // create audio engine
-        audioEngine = AVAudioEngine()
-        guard let audioEngine = audioEngine else {
-            print("Unable to create audio engine")
-            return
-        }
-        
-        let inputNode = audioEngine.inputNode
-        
-        // configure recognition task
-        recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
-            var isFinal = false
+            print("Audio session configured successfully")
             
-            if let result = result {
-                let text = result.bestTranscription.formattedString
-                isFinal = result.isFinal
-                
-                // notify listeners with recognition result
-                self?.notifyListeners("recognitionResult", data: [
-                    "text": text,
-                    "isFinal": isFinal,
-                    "language": self?.currentLanguage ?? language
-                ])
+            // Create a new audio engine
+            audioEngine = AVAudioEngine()
+            guard let audioEngine = audioEngine else {
+                print("ERROR: Unable to create audio engine")
+                return
             }
             
-            if error != nil || isFinal {
-                audioEngine.stop()
-                inputNode.removeTap(onBus: 0)
-                
-                self?.recognitionRequest = nil
-                self?.recognitionTask = nil
-                self?.isRecording = false
+            let inputNode = audioEngine.inputNode
+            let formatInput = inputNode.inputFormat(forBus: 0)
+            print("Input format: sampleRate=\(formatInput.sampleRate), channels=\(formatInput.channelCount)")
+            
+            let formatPcm = AVAudioFormat(commonFormat: AVAudioCommonFormat.pcmFormatInt16, 
+                                        sampleRate: formatInput.sampleRate, 
+                                        channels: 1, 
+                                        interleaved: true)
+            
+            guard let formatPcm = formatPcm else {
+                print("ERROR: Unable to create PCM format")
+                return
             }
-        }
-        
-        // configure audio input
-        let recordingFormat = inputNode.outputFormat(forBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
-            self.recognitionRequest?.append(buffer)
-        }
-        
-        // start audio engine
-        audioEngine.prepare()
-        do {
+            
+            // Create Vosk recognizer
+            print("Creating Vosk recognizer with sample rate: \(formatInput.sampleRate)")
+            voskRecognizer = VoskRecognizer(model: voskModel, sampleRate: Float(formatInput.sampleRate))
+            guard let voskRecognizer = voskRecognizer else {
+                print("ERROR: Unable to create Vosk recognizer")
+                return
+            }
+            print("Vosk recognizer created successfully")
+            
+            inputNode.installTap(onBus: 0,
+                                 bufferSize: UInt32(formatInput.sampleRate / 10),
+                                 format: formatPcm) { buffer, time in
+                                    self.processingQueue?.async {
+                                        let result = voskRecognizer.recognizeData(buffer: buffer)
+                                        
+                                        // Parse JSON result
+                                        if let data = result.data(using: .utf8) {
+                                            do {
+                                                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                                                    let text = json["text"] as? String ?? ""
+                                                    let partial = json["partial"] as? String ?? ""
+                                                    
+                                                    DispatchQueue.main.async {
+                                                        // Notify listeners with recognition result
+                                                        if !text.isEmpty {
+                                                            print("Final result: \(text)")
+                                                            self.notifyListeners("recognitionResult", data: [
+                                                                "text": text,
+                                                                "isFinal": true,
+                                                                "language": language
+                                                            ])
+                                                        } else if !partial.isEmpty {
+                                                            print("Partial result: \(partial)")
+                                                            self.notifyListeners("recognitionResult", data: [
+                                                                "text": partial,
+                                                                "isFinal": false,
+                                                                "language": language
+                                                            ])
+                                                        }
+                                                    }
+                                                }
+                                            } catch {
+                                                print("Error parsing Vosk result: \(error)")
+                                            }
+                                        }
+                                    }
+            }
+            
+            // Start the stream of audio data
+            audioEngine.prepare()
             try audioEngine.start()
             isRecording = true
+            currentLanguage = language
+            print("Audio engine started successfully")
+            
         } catch {
-            print("Audio engine start failed: \(error)")
+            print("ERROR: Unable to start AVAudioEngine: \(error.localizedDescription)")
         }
     }
     
-    private func stopSpeechRecognition() {
+    private func stopVoskRecognition() {
         if let audioEngine = audioEngine {
             audioEngine.stop()
             audioEngine.inputNode.removeTap(onBus: 0)
         }
         
-        recognitionRequest?.endAudio()
-        recognitionRequest = nil
-        recognitionTask?.cancel()
-        recognitionTask = nil
+        voskRecognizer = nil
         isRecording = false
         
-        // deactivate audio session
+        // Deactivate audio session
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         } catch {
@@ -379,6 +391,6 @@ public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
     }
     
     deinit {
-        stopSpeechRecognition()
+        stopVoskRecognition()
     }
 }
