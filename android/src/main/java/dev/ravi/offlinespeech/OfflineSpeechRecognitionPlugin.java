@@ -13,6 +13,9 @@ import java.util.HashMap;
 import java.io.IOException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import android.Manifest;
 import android.util.Log;
@@ -53,10 +56,14 @@ public class OfflineSpeechRecognitionPlugin extends Plugin {
     private Model currentModel;
     private Recognizer recognizer;
     private AudioRecord audioRecord;
-    private boolean isRecording = false;
+    private volatile boolean isRecording = false;
     private ExecutorService executorService;
     private String currentLanguage = "en-us";
     private ModelDownloadManager modelDownloadManager;
+
+    // Synchronization objects
+    private final Object recognizerLock = new Object();
+    private Future<?> processingFuture = null;
 
     // supported languages mapping to model names
     private static final Map<String, String> SUPPORTED_LANGUAGES = new HashMap<String, String>() {{
@@ -231,11 +238,24 @@ public class OfflineSpeechRecognitionPlugin extends Plugin {
     @PluginMethod()
     public void stopRecognition(PluginCall call) {
         try {
+            // Stop recording first
             stopAudioRecording();
-            if (recognizer != null) {
-                recognizer.close();
-                recognizer = null;
+
+            // Wait for processing thread to finish before closing recognizer
+            waitForProcessingThread();
+
+            // Now safely close the recognizer
+            synchronized (recognizerLock) {
+                if (recognizer != null) {
+                    try {
+                        recognizer.close();
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error closing recognizer", e);
+                    }
+                    recognizer = null;
+                }
             }
+
             call.resolve();
         } catch (Exception e) {
             Log.e(TAG, "Error stopping recognition", e);
@@ -283,9 +303,20 @@ public class OfflineSpeechRecognitionPlugin extends Plugin {
         Log.d(TAG, "Loading Vosk model from: " + modelDir.getAbsolutePath());
 
         try {
-            currentModel = new Model(modelDir.getAbsolutePath());
-            recognizer = new Recognizer(currentModel, 16000.0f);
-            Log.d(TAG, "Vosk model loaded successfully");
+            synchronized (recognizerLock) {
+                // Close existing recognizer if any
+                if (recognizer != null) {
+                    try {
+                        recognizer.close();
+                    } catch (Exception e) {
+                        Log.w(TAG, "Error closing existing recognizer", e);
+                    }
+                }
+
+                currentModel = new Model(modelDir.getAbsolutePath());
+                recognizer = new Recognizer(currentModel, 16000.0f);
+                Log.d(TAG, "Vosk model loaded successfully");
+            }
         } catch (Exception e) {
             Log.e(TAG, "Failed to load Vosk model from: " + modelDir.getAbsolutePath(), e);
             throw new IOException("Failed to load Vosk model: " + e.getMessage(), e);
@@ -313,40 +344,102 @@ public class OfflineSpeechRecognitionPlugin extends Plugin {
         isRecording = true;
 
         // start recognition thread
-        executorService.execute(this::processAudioData);
+        processingFuture = executorService.submit(this::processAudioData);
     }
 
     private void stopAudioRecording() {
         isRecording = false;
         if (audioRecord != null) {
-            audioRecord.stop();
-            audioRecord.release();
+            try {
+                audioRecord.stop();
+            } catch (IllegalStateException e) {
+                Log.w(TAG, "AudioRecord already stopped", e);
+            }
+            try {
+                audioRecord.release();
+            } catch (Exception e) {
+                Log.w(TAG, "Error releasing AudioRecord", e);
+            }
             audioRecord = null;
+        }
+    }
+
+    private void waitForProcessingThread() {
+        if (processingFuture != null) {
+            try {
+                // Wait up to 2 seconds for the thread to finish
+                processingFuture.get(2, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                Log.w(TAG, "Processing thread did not finish in time, cancelling");
+                processingFuture.cancel(true);
+            } catch (Exception e) {
+                Log.w(TAG, "Error waiting for processing thread", e);
+            } finally {
+                processingFuture = null;
+            }
         }
     }
 
     private void processAudioData() {
         byte[] buffer = new byte[4096];
 
-        while (isRecording && audioRecord != null) {
-            int bytesRead = audioRecord.read(buffer, 0, buffer.length);
-            if (bytesRead > 0 && recognizer != null) {
-                if (recognizer.acceptWaveForm(buffer, bytesRead)) {
-                    // final result
-                    String result = recognizer.getResult();
-                    notifyRecognitionResult(result, true);
-                } else {
-                    // partial result
-                    String partialResult = recognizer.getPartialResult();
-                    notifyRecognitionResult(partialResult, false);
+        try {
+            while (isRecording && audioRecord != null) {
+                int bytesRead = audioRecord.read(buffer, 0, buffer.length);
+
+                if (bytesRead > 0) {
+                    Recognizer localRecognizer = null;
+
+                    // Get a local reference to recognizer while holding the lock
+                    synchronized (recognizerLock) {
+                        if (recognizer != null && isRecording) {
+                            localRecognizer = recognizer;
+                        } else {
+                            // Recognizer was closed or recording stopped
+                            break;
+                        }
+                    }
+
+                    // Use local reference outside the lock to avoid holding lock during native call
+                    if (localRecognizer != null) {
+                        try {
+                            if (localRecognizer.acceptWaveForm(buffer, bytesRead)) {
+                                // final result
+                                String result = localRecognizer.getResult();
+                                notifyRecognitionResult(result, true);
+                            } else {
+                                // partial result
+                                String partialResult = localRecognizer.getPartialResult();
+                                notifyRecognitionResult(partialResult, false);
+                            }
+                        } catch (Exception e) {
+                            Log.e(TAG, "Error processing audio data", e);
+                            // If recognizer was closed, break out of loop
+                            if (!isRecording) {
+                                break;
+                            }
+                        }
+                    }
+                } else if (bytesRead == AudioRecord.ERROR_INVALID_OPERATION ||
+                        bytesRead == AudioRecord.ERROR_BAD_VALUE) {
+                    Log.e(TAG, "Error reading audio data: " + bytesRead);
+                    break;
                 }
             }
-        }
-
-        // get final result
-        if (recognizer != null) {
-            String finalResult = recognizer.getFinalResult();
-            notifyRecognitionResult(finalResult, true);
+        } catch (Exception e) {
+            Log.e(TAG, "Error in processAudioData", e);
+        } finally {
+            // get final result if recognizer is still available
+            synchronized (recognizerLock) {
+                if (recognizer != null && isRecording) {
+                    try {
+                        String finalResult = recognizer.getFinalResult();
+                        notifyRecognitionResult(finalResult, true);
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error getting final result", e);
+                    }
+                }
+            }
         }
     }
 
@@ -398,18 +491,39 @@ public class OfflineSpeechRecognitionPlugin extends Plugin {
             stopAudioRecording();
         }
 
-        if (recognizer != null) {
-            recognizer.close();
-            recognizer = null;
+        // Wait for processing thread to finish
+        waitForProcessingThread();
+
+        synchronized (recognizerLock) {
+            if (recognizer != null) {
+                try {
+                    recognizer.close();
+                } catch (Exception e) {
+                    Log.e(TAG, "Error closing recognizer in handleOnDestroy", e);
+                }
+                recognizer = null;
+            }
         }
 
         if (currentModel != null) {
-            currentModel.close();
+            try {
+                currentModel.close();
+            } catch (Exception e) {
+                Log.e(TAG, "Error closing model in handleOnDestroy", e);
+            }
             currentModel = null;
         }
 
         if (executorService != null) {
             executorService.shutdown();
+            try {
+                if (!executorService.awaitTermination(2, TimeUnit.SECONDS)) {
+                    executorService.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executorService.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
             executorService = null;
         }
     }
