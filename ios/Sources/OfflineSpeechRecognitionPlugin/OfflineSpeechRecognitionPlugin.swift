@@ -73,12 +73,18 @@ public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
     
     @objc func getSupportedLanguages(_ call: CAPPluginCall) {
         var languages: [[String: Any]] = []
+        let sortedLanguages = supportedLanguages.map { (code, modelName) -> (code: String, modelName: String, displayName: String) in
+            let displayName = languageNames[code] ?? code
+            return (code, modelName, displayName)
+        }.sorted { lhs, rhs in
+            lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+        }
         
-        for (code, modelName) in supportedLanguages {
+        for languageInfo in sortedLanguages {
             let language: [String: Any] = [
-                "code": code,
-                "modelName": modelName,
-                "name": languageNames[code] ?? code,
+                "code": languageInfo.code,
+                "modelName": languageInfo.modelName,
+                "name": languageInfo.displayName,
                 "offlineSupported": true
             ]
             languages.append(language)
@@ -95,13 +101,20 @@ public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         
-        for (code, modelName) in supportedLanguages {
-            if downloadManager.isModelDownloaded(modelName: modelName) {
+        let sortedLanguages = supportedLanguages.map { (code, modelName) -> (code: String, modelName: String, displayName: String) in
+            let displayName = languageNames[code] ?? code
+            return (code, modelName, displayName)
+        }.sorted { lhs, rhs in
+            lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+        }
+        
+        for languageInfo in sortedLanguages {
+            if downloadManager.isModelDownloaded(modelName: languageInfo.modelName) {
                 let model: [String: Any] = [
-                    "modelName": modelName,
-                    "language": code,
-                    "name": languageNames[code] ?? code,
-                    "size": downloadManager.getModelSize(modelName: modelName),
+                    "modelName": languageInfo.modelName,
+                    "language": languageInfo.code,
+                    "name": languageInfo.displayName,
+                    "size": downloadManager.getModelSize(modelName: languageInfo.modelName),
                     "offlineSupported": true
                 ]
                 models.append(model)

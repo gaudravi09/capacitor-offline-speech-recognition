@@ -9,7 +9,9 @@ import org.json.JSONException;
 
 import java.io.File;
 import java.util.Map;
+import java.util.List;
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.io.IOException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
@@ -101,7 +103,8 @@ public class OfflineSpeechRecognitionPlugin extends Plugin {
     public void getSupportedLanguages(PluginCall call) {
         try {
             JSONArray languages = new JSONArray();
-            for (Map.Entry<String, String> entry : SUPPORTED_LANGUAGES.entrySet()) {
+            List<Map.Entry<String, String>> sortedEntries = getSortedSupportedLanguageEntries();
+            for (Map.Entry<String, String> entry : sortedEntries) {
                 JSONObject language = new JSONObject();
 
                 language.put("code", entry.getKey());
@@ -126,7 +129,8 @@ public class OfflineSpeechRecognitionPlugin extends Plugin {
             JSONArray downloadedModels = new JSONArray();
 
             // check each supported language to see if model is downloaded
-            for (Map.Entry<String, String> entry : SUPPORTED_LANGUAGES.entrySet()) {
+            List<Map.Entry<String, String>> sortedEntries = getSortedSupportedLanguageEntries();
+            for (Map.Entry<String, String> entry : sortedEntries) {
                 String modelName = entry.getValue();
                 String languageCode = entry.getKey();
 
@@ -458,6 +462,20 @@ public class OfflineSpeechRecognitionPlugin extends Plugin {
         } catch (JSONException e) {
             Log.e(TAG, "Error parsing recognition result", e);
         }
+    }
+
+    private List<Map.Entry<String, String>> getSortedSupportedLanguageEntries() {
+        List<Map.Entry<String, String>> entries = new ArrayList<>(SUPPORTED_LANGUAGES.entrySet());
+        entries.sort((a, b) -> {
+            String nameA = getLanguageName(a.getKey());
+            String nameB = getLanguageName(b.getKey());
+            int comparison = nameA.compareToIgnoreCase(nameB);
+            if (comparison != 0) {
+                return comparison;
+            }
+            return a.getKey().compareToIgnoreCase(b.getKey());
+        });
+        return entries;
     }
 
     private String getLanguageName(String code) {

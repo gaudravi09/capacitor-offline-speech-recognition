@@ -11,6 +11,7 @@ import android.content.SharedPreferences;
 import java.io.*;
 import java.net.URI;
 import java.util.List;
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.zip.ZipEntry;
 import java.net.HttpURLConnection;
@@ -28,7 +29,7 @@ public class ModelDownloadManager {
     private final ExecutorService downloadExecutor = Executors.newSingleThreadExecutor();
 
     // model URLs mapping - these are the direct download links from alphacephei.com
-    private final java.util.Map<String, String> modelUrls = new java.util.HashMap<String, String>() {{
+    private final Map<String, String> modelUrls = new HashMap<String, String>() {{
         put("model-tr", "https://alphacephei.com/vosk/models/vosk-model-small-tr-0.3.zip");
         put("model-pt", "https://alphacephei.com/vosk/models/vosk-model-small-pt-0.3.zip");
         put("model-vi", "https://alphacephei.com/vosk/models/vosk-model-small-vn-0.3.zip");
@@ -264,7 +265,7 @@ public class ModelDownloadManager {
         }
     }
 
-    private void listFilesRecursively(File dir, java.util.List<File> files) {
+    private void listFilesRecursively(File dir, List<File> files) {
         if (dir.isDirectory()) {
             File[] children = dir.listFiles();
             if (children != null) {
@@ -291,7 +292,7 @@ public class ModelDownloadManager {
     }
 
     private String findCommonTopLevelDir(File zipFile) {
-        java.util.Set<String> seen = new java.util.HashSet<>();
+        Set<String> seen = new HashSet<>();
         try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
             ZipEntry e = zis.getNextEntry();
             while (e != null) {
@@ -319,40 +320,81 @@ public class ModelDownloadManager {
             return false;
         }
 
-        java.util.List<File> allFiles = new java.util.ArrayList<>();
+        List<File> allFiles = new ArrayList<>();
         listFilesRecursively(modelDir, allFiles);
-        long fileCount = allFiles.stream().filter(File::isFile).count();
-
-        if (fileCount == 0) {
+        Set<String> signatures = collectModelFileSignatures(modelDir, allFiles);
+        if (signatures.isEmpty()) {
             Log.d(TAG, "Model directory has no files");
             return false;
         }
 
-        // check for common Vosk model files
-        String[] commonModelFiles = {
-            "uuid",
-            "HCLr.fst",
-            "am/final.mdl",
-            "graph/HCLG.fst",
-            "graph/HCLr.fst",
-            "conf/model.conf",
-            "ivector/final.ie",
-            "conf/ivector_extractor.conf",
-            "graph/phones/word_boundary.int"
-        };
+        Set<String> matchedFiles = new HashSet<>();
 
-        int foundFiles = 0;
-        for (String file : commonModelFiles) {
-            File fileObj = new File(modelDir, file);
-            if (fileObj.exists() && fileObj.length() > 0) {
-                foundFiles++;
+        boolean hasAcoustic = matches(signatures, matchedFiles, "am/final.mdl", "final.mdl");
+        boolean hasGraph = matches(signatures, matchedFiles, "graph/hclg.fst", "hclg.fst", "gr.fst");
+        boolean hasConfig = matches(signatures, matchedFiles, "conf/model.conf", "conf/mfcc.conf", "mfcc.conf");
+        boolean hasIvector = matches(signatures, matchedFiles, "ivector/final.ie", "ivector/final.dubm", "ivector/final.mat");
+        boolean hasPhones = matches(signatures, matchedFiles, "graph/phones/word_boundary.int", "word_boundary.int", "phones.txt");
+        boolean hasDisambig = matches(signatures, matchedFiles, "disambig_tid.int");
+
+        int supportingCount = 0;
+        if (hasGraph) supportingCount++;
+        if (hasConfig) supportingCount++;
+        if (hasIvector) supportingCount++;
+        if (hasPhones) supportingCount++;
+        if (hasDisambig) supportingCount++;
+
+        boolean isValid = hasAcoustic && supportingCount >= 2;
+        Log.d(TAG, "Model verification result: " + isValid + " (found " + matchedFiles.size() + " key files)");
+        if (!matchedFiles.isEmpty()) {
+            Log.d(TAG, "Matched key files: " + matchedFiles);
+        }
+        if (!isValid) {
+            List<String> sample = new ArrayList<>();
+            for (String signature : signatures) {
+                sample.add(signature);
+                if (sample.size() >= 10) {
+                    break;
+                }
             }
+            Log.d(TAG, "Sample files for troubleshooting: " + sample);
         }
 
-        boolean isValid = foundFiles >= 2;
-        Log.d(TAG, "Model verification result: " + isValid + " (found " + foundFiles + " model files)");
-
         return isValid;
+    }
+
+    private Set<String> collectModelFileSignatures(File rootDir, List<File> allFiles) {
+        Set<String> signatures = new HashSet<>();
+        String basePath = rootDir.getAbsolutePath();
+        if (!basePath.endsWith(File.separator)) {
+            basePath = basePath + File.separator;
+        }
+        for (File file : allFiles) {
+            if (file == null || !file.isFile()) {
+                continue;
+            }
+            String absolute = file.getAbsolutePath();
+            if (!absolute.startsWith(basePath)) {
+                continue;
+            }
+            String relative = absolute.substring(basePath.length());
+            if (!relative.isEmpty()) {
+                signatures.add(relative.replace('\\', '/').toLowerCase(Locale.ROOT));
+            }
+        }
+        return signatures;
+    }
+
+    private boolean matches(Set<String> signatures, Set<String> matchedFiles, String... suffixes) {
+        for (String suffix : suffixes) {
+            for (String signature : signatures) {
+                if (signature.endsWith(suffix)) {
+                    matchedFiles.add(signature);
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public boolean isModelDownloaded(String modelName) {

@@ -171,56 +171,107 @@ public class ModelDownloadManager {
             return false
         }
         
-        // Check for common Vosk model files
-        let commonModelFiles = [
-            "uuid",
-            "HCLr.fst",
-            "am/final.mdl",
-            "graph/HCLG.fst",
-            "graph/HCLr.fst",
-            "conf/model.conf",
-            "ivector/final.ie",
-            "conf/ivector_extractor.conf",
-            "graph/phones/word_boundary.int"
-        ]
-        
-        // Check expected paths relative to this root
-        var foundFiles = 0
-        for file in commonModelFiles {
-            let fileURL = modelDir.appendingPathComponent(file)
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                foundFiles += 1
-            }
+        let signatures = collectModelFileSignatures(at: modelDir)
+        if signatures.isEmpty {
+            print("Model directory has no files")
+            return false
         }
         
-        let isValid = foundFiles >= 2
-        print("Model verification result: \(isValid) (found \(foundFiles) model files)")
-        
-        return isValid
+        let evaluation = evaluateModelSignatures(signatures)
+        print("Model verification result: \(evaluation.isValid) (found \(evaluation.matchedFiles.count) key files)")
+        if !evaluation.matchedFiles.isEmpty {
+            print("Matched key files: \(evaluation.matchedFiles.sorted())")
+        }
+        if !evaluation.isValid {
+            let sample = Array(signatures.prefix(10))
+            print("Sample files for troubleshooting: \(sample)")
+        }
+        return evaluation.isValid
     }
 
     // Resolve actual model root if zip extracted into a nested top-level directory
     private func resolveModelRoot(modelDir: URL) -> URL {
         // If directory already contains expected structure, return as-is
-        let confPath = modelDir.appendingPathComponent("conf/model.conf").path
-        if FileManager.default.fileExists(atPath: confPath) {
+        if containsModelStructure(at: modelDir) {
             return modelDir
         }
-        // If there's exactly one subdirectory (common in zips), use it
-        if let contents = try? FileManager.default.contentsOfDirectory(at: modelDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            let subdirs = contents.filter { url in
-                (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        let fileManager = FileManager.default
+        if let contents = try? fileManager.contentsOfDirectory(at: modelDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            for url in contents {
+                let resourceValues = try? url.resourceValues(forKeys: [.isDirectoryKey])
+                guard resourceValues?.isDirectory == true else { continue }
+                if containsModelStructure(at: url) {
+                    return url
+                }
             }
-            if subdirs.count == 1 {
-                let candidate = subdirs[0]
-                // If the candidate contains expected files, use it
-                let candidateConf = candidate.appendingPathComponent("conf/model.conf").path
-                if FileManager.default.fileExists(atPath: candidateConf) {
-                    return candidate
+        }
+        if let enumerator = fileManager.enumerator(at: modelDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            for case let url as URL in enumerator {
+                let resourceValues = try? url.resourceValues(forKeys: [.isDirectoryKey])
+                guard resourceValues?.isDirectory == true else { continue }
+                if containsModelStructure(at: url) {
+                    return url
                 }
             }
         }
         return modelDir
+    }
+
+    private func containsModelStructure(at url: URL) -> Bool {
+        let signatures = collectModelFileSignatures(at: url)
+        return evaluateModelSignatures(signatures).isValid
+    }
+
+    private func collectModelFileSignatures(at url: URL) -> Set<String> {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
+            return []
+        }
+        var signatures: Set<String> = []
+        let basePath = url.path.hasSuffix("/") ? url.path : url.path + "/"
+        for case let fileURL as URL in enumerator {
+            if let resourceValues = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+               resourceValues.isRegularFile == true {
+                let fullPath = fileURL.path
+                guard fullPath.hasPrefix(basePath) else { continue }
+                let relativePath = String(fullPath.dropFirst(basePath.count))
+                if !relativePath.isEmpty {
+                    signatures.insert(relativePath.replacingOccurrences(of: "\\", with: "/").lowercased())
+                }
+            }
+        }
+        return signatures
+    }
+
+    private func evaluateModelSignatures(_ signatures: Set<String>) -> (isValid: Bool, matchedFiles: Set<String>) {
+        guard !signatures.isEmpty else { return (false, []) }
+        
+        var matchedFiles: Set<String> = []
+        
+        let hasAcoustic = matches(suffixes: ["am/final.mdl", "final.mdl"], in: signatures, matched: &matchedFiles)
+        let hasGraph = matches(suffixes: ["graph/hclg.fst", "hclg.fst", "gr.fst"], in: signatures, matched: &matchedFiles)
+        let hasConfig = matches(suffixes: ["conf/model.conf", "conf/mfcc.conf", "mfcc.conf"], in: signatures, matched: &matchedFiles)
+        let hasIvector = matches(suffixes: ["ivector/final.ie", "ivector/final.dubm", "ivector/final.mat"], in: signatures, matched: &matchedFiles)
+        let hasPhones = matches(suffixes: ["graph/phones/word_boundary.int", "word_boundary.int", "phones.txt"], in: signatures, matched: &matchedFiles)
+        let hasDisambig = matches(suffixes: ["disambig_tid.int"], in: signatures, matched: &matchedFiles)
+        
+        var supportingCount = 0
+        for flag in [hasGraph, hasConfig, hasIvector, hasPhones, hasDisambig] where flag {
+            supportingCount += 1
+        }
+        
+        let isValid = hasAcoustic && supportingCount >= 2
+        return (isValid, matchedFiles)
+    }
+
+    private func matches(suffixes: [String], in signatures: Set<String>, matched: inout Set<String>) -> Bool {
+        for suffix in suffixes {
+            if let match = signatures.first(where: { $0.hasSuffix(suffix) }) {
+                matched.insert(match)
+                return true
+            }
+        }
+        return false
     }
     
     private func isInternetAvailable() -> Bool {
