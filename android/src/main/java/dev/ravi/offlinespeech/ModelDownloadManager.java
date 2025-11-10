@@ -10,8 +10,13 @@ import android.content.SharedPreferences;
 
 import java.io.*;
 import java.net.URI;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.List;
 import java.util.Locale;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.ArrayList;
 import java.util.zip.ZipEntry;
 import java.net.HttpURLConnection;
@@ -25,6 +30,7 @@ public class ModelDownloadManager {
 
     private final Context context;
     private final SharedPreferences prefs;
+    private final String sessionId = UUID.randomUUID().toString();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService downloadExecutor = Executors.newSingleThreadExecutor();
 
@@ -75,6 +81,7 @@ public class ModelDownloadManager {
 
                 // use cache directory instead of files directory
                 File modelDir = new File(context.getCacheDir(), "model/" + modelName);
+                cleanupModelDirectory(modelDir);
                 modelDir.mkdirs();
 
                 // mark as in-progress for this session and reset progress
@@ -413,22 +420,41 @@ public class ModelDownloadManager {
     }
 
     private void markInProgress(String modelName, boolean inProgress) {
-        android.content.SharedPreferences.Editor editor = prefs.edit();
+        SharedPreferences.Editor editor = prefs.edit();
+        String inProgressKey = getInProgressKey(modelName);
+        String sessionKey = getSessionKey(modelName);
+        String progressKey = getProgressKey(modelName);
         if (inProgress) {
-            editor.putBoolean("download_in_progress_" + modelName, true);
+            editor.putBoolean(inProgressKey, true);
+            editor.putString(sessionKey, sessionId);
         } else {
-            editor.remove("download_in_progress_" + modelName);
-            editor.remove("download_progress_" + modelName);
+            editor.remove(inProgressKey);
+            editor.remove(sessionKey);
+            editor.remove(progressKey);
         }
         editor.apply();
     }
 
     private void persistProgress(String modelName, int progress) {
-        prefs.edit().putInt("download_progress_" + modelName, Math.max(0, Math.min(100, progress))).apply();
+        prefs.edit().putInt(getProgressKey(modelName), Math.max(0, Math.min(100, progress))).apply();
     }
 
     public boolean isDownloadInProgress(String modelName) {
-        return prefs.getBoolean("download_in_progress_" + modelName, false);
+        String inProgressKey = getInProgressKey(modelName);
+        if (!prefs.getBoolean(inProgressKey, false)) {
+            return false;
+        }
+
+        String sessionKey = getSessionKey(modelName);
+        String storedSession = prefs.getString(sessionKey, null);
+        if (!sessionId.equals(storedSession)) {
+            Log.d(TAG, "Detected stale download session for " + modelName + ". Cleaning up cached data.");
+            cleanupModelDirectory(new File(context.getCacheDir(), "model/" + modelName));
+            markInProgress(modelName, false);
+            return false;
+        }
+
+        return true;
     }
 
     public long getModelSize(String modelName) {
@@ -438,6 +464,24 @@ public class ModelDownloadManager {
         List<File> files = new ArrayList<>();
         listFilesRecursively(modelDir, files);
         return files.stream().filter(File::isFile).mapToLong(File::length).sum();
+    }
+
+    private String getInProgressKey(String modelName) {
+        return "download_in_progress_" + modelName;
+    }
+
+    private String getSessionKey(String modelName) {
+        return "download_session_" + modelName;
+    }
+
+    private String getProgressKey(String modelName) {
+        return "download_progress_" + modelName;
+    }
+
+    private void cleanupModelDirectory(File modelDir) {
+        if (modelDir.exists()) {
+            deleteRecursively(modelDir);
+        }
     }
 
     private boolean isInternetAvailable() {

@@ -7,6 +7,7 @@ public class ModelDownloadManager {
     private let userDefaults = UserDefaults.standard
     // Retain KVO observations for URLSessionTask progress to avoid deallocation
     private var taskProgressObservations: [URLSessionTask: NSKeyValueObservation] = [:]
+    private let sessionIdentifier = UUID().uuidString
     
     // Model URLs mapping - same as Android
     private let modelUrls: [String: String] = [
@@ -56,6 +57,9 @@ public class ModelDownloadManager {
         print("Starting download for \(modelName) from \(modelUrl)")
         
         let modelDir = cacheDirectory.appendingPathComponent(modelName)
+
+        // Clean up any previous partial downloads before starting fresh
+        cleanupModelDirectory(modelName: modelName)
         
         // Mark as in progress
         markInProgress(modelName: modelName, inProgress: true)
@@ -293,10 +297,14 @@ public class ModelDownloadManager {
     }
     
     private func markInProgress(modelName: String, inProgress: Bool) {
+        let inProgressKey = makeInProgressKey(modelName: modelName)
+        let sessionKey = makeSessionKey(modelName: modelName)
         if inProgress {
-            userDefaults.set(true, forKey: "download_in_progress_\(modelName)")
+            userDefaults.set(true, forKey: inProgressKey)
+            userDefaults.set(sessionIdentifier, forKey: sessionKey)
         } else {
-            userDefaults.removeObject(forKey: "download_in_progress_\(modelName)")
+            userDefaults.removeObject(forKey: inProgressKey)
+            userDefaults.removeObject(forKey: sessionKey)
             userDefaults.removeObject(forKey: "download_progress_\(modelName)")
         }
     }
@@ -304,9 +312,43 @@ public class ModelDownloadManager {
     private func persistProgress(modelName: String, progress: Int) {
         userDefaults.set(progress, forKey: "download_progress_\(modelName)")
     }
+
+    private func makeInProgressKey(modelName: String) -> String {
+        return "download_in_progress_\(modelName)"
+    }
+
+    private func makeSessionKey(modelName: String) -> String {
+        return "download_session_\(modelName)"
+    }
+
+    private func cleanupModelDirectory(modelName: String) {
+        let modelDir = cacheDirectory.appendingPathComponent(modelName)
+        if FileManager.default.fileExists(atPath: modelDir.path) {
+            do {
+                try FileManager.default.removeItem(at: modelDir)
+                print("Cleaned up cached data for \(modelName)")
+            } catch {
+                print("Warning: Failed to remove cached model directory for \(modelName): \(error)")
+            }
+        }
+    }
     
     public func isDownloadInProgress(modelName: String) -> Bool {
-        return userDefaults.bool(forKey: "download_in_progress_\(modelName)")
+        let inProgressKey = makeInProgressKey(modelName: modelName)
+        guard userDefaults.bool(forKey: inProgressKey) else {
+            return false
+        }
+
+        let sessionKey = makeSessionKey(modelName: modelName)
+        guard let storedSession = userDefaults.string(forKey: sessionKey),
+              storedSession == sessionIdentifier else {
+            print("Detected stale download session for \(modelName). Cleaning up cached data.")
+            cleanupModelDirectory(modelName: modelName)
+            markInProgress(modelName: modelName, inProgress: false)
+            return false
+        }
+
+        return true
     }
     
     public func getModelSize(modelName: String) -> Int64 {
