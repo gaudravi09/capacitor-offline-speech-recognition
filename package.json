@@ -1,6 +1,6 @@
 {
   "name": "capacitor-offline-speech-recognition",
-  "version": "1.0.3",
+  "version": "2.1.0",
   "description": "A Capacitor plugin that provides offline speech-to-text functionality for Android and iOS platforms. The plugin offers true offline recognition for Android with multiple languages, while iOS provides offline support for English with online fallback for other languages.",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",

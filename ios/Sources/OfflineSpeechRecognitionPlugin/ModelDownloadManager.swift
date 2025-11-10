@@ -12,6 +12,7 @@ public class ModelDownloadManager {
     // Model URLs mapping - same as Android
     private let modelUrls: [String: String] = [
         "model-tr": "https://alphacephei.com/vosk/models/vosk-model-small-tr-0.3.zip",
+        "model-ar": "https://alphacephei.com/vosk/models/vosk-model-ar-mgb2-0.4.zip",
         "model-pt": "https://alphacephei.com/vosk/models/vosk-model-small-pt-0.3.zip",
         "model-vi": "https://alphacephei.com/vosk/models/vosk-model-small-vn-0.3.zip",
         "model-es": "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip",

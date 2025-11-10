@@ -76,6 +76,7 @@ public class OfflineSpeechRecognitionPlugin extends Plugin {
         put("pt", "model-pt");
         put("zh", "model-zh");
         put("ru", "model-ru");
+        put("ar", "model-ar");
         put("tr", "model-tr");
         put("vi", "model-vi");
         put("it", "model-it");
@@ -488,6 +489,7 @@ public class OfflineSpeechRecognitionPlugin extends Plugin {
             put("es", "Spanish");
             put("zh", "Chinese");
             put("ru", "Russian");
+            put("ar", "Arabic");
             put("tr", "Turkish");
             put("it", "Italian");
             put("gu", "Gujarati");

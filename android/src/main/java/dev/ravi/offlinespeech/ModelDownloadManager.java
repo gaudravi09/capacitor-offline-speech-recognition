@@ -37,6 +37,7 @@ public class ModelDownloadManager {
     // model URLs mapping - these are the direct download links from alphacephei.com
     private final Map<String, String> modelUrls = new HashMap<String, String>() {{
         put("model-tr", "https://alphacephei.com/vosk/models/vosk-model-small-tr-0.3.zip");
+        put("model-ar", "https://alphacephei.com/vosk/models/vosk-model-ar-mgb2-0.4.zip");
         put("model-pt", "https://alphacephei.com/vosk/models/vosk-model-small-pt-0.3.zip");
         put("model-vi", "https://alphacephei.com/vosk/models/vosk-model-small-vn-0.3.zip");
         put("model-es", "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip");

@@ -31,6 +31,7 @@ public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
         "pt": "model-pt",
         "zh": "model-zh",
         "ru": "model-ru",
+        "ar": "model-ar",
         "tr": "model-tr",
         "vi": "model-vi",
         "it": "model-it",
@@ -51,6 +52,7 @@ public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
         "es": "Spanish",
         "zh": "Chinese",
         "ru": "Russian",
+        "ar": "Arabic",
         "tr": "Turkish",
         "it": "Italian",
         "gu": "Gujarati",
@@ -394,15 +396,25 @@ public class OfflineSpeechRecognitionPlugin: CAPPlugin, CAPBridgedPlugin {
         
         voskRecognizer = nil
         isRecording = false
-        
+
         // Deactivate audio session
+        let audioSession = AVAudioSession.sharedInstance()
         do {
-            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            print("Audio session deactivated after STT.")
         } catch {
             print("Audio session deactivation failed: \(error)")
         }
-    }
     
+        // Switch AVAudioSession back to playback mode
+        do {
+            try audioSession.setCategory(.playback, mode: .spokenAudio, options: [])
+            try audioSession.setActive(true)
+            print("Audio session restored to playback mode.")
+        } catch {
+            print("Failed to restore playback mode: \(error)")
+        }
+    }
     deinit {
         stopVoskRecognition()
     }
